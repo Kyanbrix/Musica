@@ -6,11 +6,14 @@
         </encoder>
     </appender>
 
+    <!-- Switch to debug when troubleshooting; debug logs every gateway/REST call -->
     <!-- JDA -->
-    <logger name="net.dv8tion.jda" level="debug"/>
+    <logger name="net.dv8tion.jda" level="info"/>
+
+    <logger name="com.github.kyanbrix" level="debug"/>
 
     <!-- All the remaining loggers -->
-    <root level="debug">
+    <root level="info">
         <appender-ref ref="STDOUT"/>
     </root>
 </configuration>

@@ -2,6 +2,7 @@ package com.github.kyanbrix.command;
 
 import com.github.kyanbrix.GuildMusicManager;
 import com.github.kyanbrix.MusicManager;
+import com.github.kyanbrix.utils.MusicUtil;
 import dev.arbjerg.lavalink.client.LavalinkClient;
 import dev.arbjerg.lavalink.client.Link;
 import dev.arbjerg.lavalink.client.player.Track;
@@ -24,7 +25,7 @@ public class SkipSong implements ICommand {
 
 
     @Override
-    public void execute(MessageReceivedEvent event) {
+    public void execute(MessageReceivedEvent event, String args) {
 
         if (assertMemberInVoice(event)) handleSkip(event);
 
@@ -38,39 +39,49 @@ public class SkipSong implements ICommand {
 
     @Override
     public String[] aliases() {
-        return new String[]{"skip"};
+        return new String[]{"skip", "next"};
+    }
+
+    @Override
+    public String description() {
+        return "Skips the current song";
     }
 
     private void handleSkip(MessageReceivedEvent event) {
 
         long guildId = event.getGuild().getIdLong();
 
-        GuildMusicManager guildMusicManager = musicManager.getOrCreate(guildId);
-        Link link = client.getOrCreateLink(guildId);
+        GuildMusicManager guildMusicManager = musicManager.get(guildId);
+        Link link = client.getLinkIfCached(guildId);
 
+        if (guildMusicManager == null || link == null) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ Nothing is currently playing!")).queue();
+            return;
+        }
 
         link.getPlayer().subscribe(lavalinkPlayer -> {
 
-            if (lavalinkPlayer.getTrack() == null) {
+            Track skipped = lavalinkPlayer.getTrack();
 
-                event.getChannel().sendMessage("Nothing currently playing!")
+            if (skipped == null) {
+
+                event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ Nothing is currently playing!"))
                         .queue();
 
                 return;
+            }
+
+            // In queue-loop mode a skipped song still comes around again
+            if (guildMusicManager.getLoopMode() == GuildMusicManager.LoopMode.QUEUE) {
+                guildMusicManager.enQueue(skipped.makeClone());
             }
 
             Track nextTrack = guildMusicManager.pollNext();
 
             if (nextTrack == null) {
 
-                lavalinkPlayer.setTrack(null)
-                        .doOnSuccess(v -> {
-                            link.destroy().subscribe();
-                            event.getGuild().getAudioManager().closeAudioConnection();
-                            musicManager.remove(guildId);
-                        })
-                        .doOnError(err -> log.error("Error during skip-to-empty: {}", err.getMessage()))
-                        .subscribe();
+                musicManager.disconnectAndClean(guildId);
+
                 MessageEmbed embed = new EmbedBuilder()
                         .setDescription("⏭️ Skipped! The queue is now empty — disconnecting.")
                         .build();
@@ -81,12 +92,10 @@ public class SkipSong implements ICommand {
 
             }else {
 
-                lavalinkPlayer.setTrack(nextTrack)
-                        .doOnError(err -> log.error("Error skipping to next song {}",err.getMessage()))
-                        .subscribe();
+                musicManager.play(guildId, nextTrack);
 
                 MessageEmbed embed = new EmbedBuilder()
-                        .setDescription(String.format("[**%s**](%s) has been skipped by <@%s>",lavalinkPlayer.getTrack().getInfo().getTitle(),lavalinkPlayer.getTrack().getInfo().getUri(),event.getAuthor().getId()))
+                        .setDescription(String.format("%s has been skipped by %s", MusicUtil.trackLink(skipped.getInfo()), event.getAuthor().getAsMention()))
                         .setColor(0x7FFFD4)
                         .build();
 
@@ -96,7 +105,7 @@ public class SkipSong implements ICommand {
 
         },err -> {
             log.error("Error fetching player for skip: {}",err.getMessage());
-            event.getChannel().sendMessage("Could not access the player").queue();
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("Could not access the player")).queue();
         });
 
     }

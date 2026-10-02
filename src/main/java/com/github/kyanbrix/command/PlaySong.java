@@ -1,31 +1,34 @@
 package com.github.kyanbrix.command;
 
-import com.github.kyanbrix.Constant;
 import com.github.kyanbrix.GuildMusicManager;
 import com.github.kyanbrix.MusicManager;
+import com.github.kyanbrix.utils.Config;
+import com.github.kyanbrix.utils.MusicUtil;
 import dev.arbjerg.lavalink.client.LavalinkClient;
 import dev.arbjerg.lavalink.client.LavalinkNode;
 import dev.arbjerg.lavalink.client.Link;
 import dev.arbjerg.lavalink.client.player.*;
+import dev.arbjerg.lavalink.protocol.v4.TrackInfo;
 import net.dv8tion.jda.api.EmbedBuilder;
+import net.dv8tion.jda.api.Permission;
+import net.dv8tion.jda.api.entities.Member;
 import net.dv8tion.jda.api.entities.MessageEmbed;
+import net.dv8tion.jda.api.entities.channel.middleman.AudioChannel;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
+import net.dv8tion.jda.api.utils.MarkdownSanitizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.util.retry.Retry;
 
 import java.time.Duration;
 import java.util.List;
-import java.util.Optional;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 
 public class PlaySong implements ICommand {
     private static final Logger log = LoggerFactory.getLogger(PlaySong.class);
+    private static final String SEARCH_PROVIDER = Config.get("search.provider", "ytsearch");
     private final LavalinkClient client;
     private final MusicManager musicManager;
-    private static final ExecutorService service = Executors.newFixedThreadPool(2);
     private static final Pattern URL_PATTERN = Pattern.compile(
             "^(https?|ftp)://[^\\s/$.?#].[^\\s]*$",
             Pattern.CASE_INSENSITIVE
@@ -39,9 +42,14 @@ public class PlaySong implements ICommand {
     }
 
     @Override
-    public void execute(MessageReceivedEvent event) {
+    public void execute(MessageReceivedEvent event, String args) {
 
-        if (assertMemberInVoice(event)) handlePlay(event);
+        if (args.isEmpty()) {
+            replyUsage(event);
+            return;
+        }
+
+        if (assertMemberInVoice(event)) handlePlay(event, args);
 
 
     }
@@ -56,104 +64,71 @@ public class PlaySong implements ICommand {
         return new String[]{"play","song","insert"};
     }
 
+    @Override
+    public String description() {
+        return "Plays a song or playlist, or adds it to the queue";
+    }
 
-    private String song(String message) {
+    @Override
+    public String usage() {
+        return "<song name or URL>";
+    }
 
-        String[] args = message.split("\\s+");
+    private void handlePlay(MessageReceivedEvent event, String args) {
 
-        String invokeCommand = args[0].substring(Constant.PREFIX.length());
+        // Discord users wrap links in <> to hide the embed preview
+        String query = args.startsWith("<") && args.endsWith(">") ? args.substring(1, args.length() - 1) : args;
+        long guildId = event.getGuild().getIdLong();
 
-        if (args.length == 1) {
-            return "null";
+        if (client.getNodes().stream().noneMatch(LavalinkNode::getAvailable)) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ The music server is not available right now. Please try again later.")).queue();
+            return;
         }
 
+        if (!connectIfNeeded(event)) return;
 
+        event.getChannel().sendTyping().queue();
 
-        StringBuilder sb = new StringBuilder();
+        GuildMusicManager guildMusicManager = musicManager.getOrCreate(guildId);
+        guildMusicManager.setTextChannelId(event.getChannel().getIdLong());
 
-        if (invokeCommand.equalsIgnoreCase(commandName())) {
+        Link link = client.getOrCreateLink(guildId);
 
+        String identifier = isUrl(query) ? query : SEARCH_PROVIDER + ":" + query;
 
-            for (int index = 1; index < args.length; index++)  {
-
-                sb.append(args[index]).append(" ");
-
-            }
-
-            return sb.toString().strip();
-
-        }else {
-
-
-            for (String alias: aliases()) {
-
-                if (invokeCommand.equalsIgnoreCase(alias)) {
-                    for (int index = 1; index < args.length; index++)  {
-
-                        sb.append(args[index]).append(" ");
-
-                    }
-
-                    return sb.toString().strip();
-                }
-
-            }
-
-        }
-
-        return "null";
+        link.loadItem(identifier)
+                .retryWhen(Retry.fixedDelay(2, Duration.ofSeconds(3)))
+                .subscribe(
+                        result -> handleResult(event, link, guildMusicManager, query, result),
+                        error -> {
+                            log.error("Error loading '{}': {}", query, error.getMessage());
+                            event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ An error occurred while loading the track.")).queue();
+                        }
+                );
 
     }
 
-    private void handlePlay(MessageReceivedEvent event) {
+    /** @return false if the bot could not join the member's voice channel */
+    private boolean connectIfNeeded(MessageReceivedEvent event) {
 
-        String query = song(event.getMessage().getContentRaw());
-        long guildId = event.getGuild().getIdLong();
+        Member self = event.getGuild().getSelfMember();
+        if (self.getVoiceState() != null && self.getVoiceState().inAudioChannel()) return true;
 
+        AudioChannel channel = event.getMember().getVoiceState().getChannel();
 
-        service.submit(() -> {
-            event.getChannel().sendTyping().queue();
+        if (!self.hasPermission(channel, Permission.VOICE_CONNECT, Permission.VOICE_SPEAK)) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ I need permission to **connect** and **speak** in " + channel.getAsMention() + ".")).queue();
+            return false;
+        }
 
-            GuildMusicManager guildMusicManager = musicManager.getOrCreate(guildId);
-            guildMusicManager.setTextChannelId(event.getChannel().getIdLong());
-
-            Link link = client.getOrCreateLink(guildId);
-
-            String identifier = isUrl(query) ? query: "ytsearch:"+ query;
-
-            Optional<LavalinkNode> nodeOptional = client.getNodes()
-                    .stream()
-                    .filter(LavalinkNode::getAvailable)
-                    .findFirst();
-
-
-            nodeOptional.ifPresent(System.out::println);
-
-            if (nodeOptional.isEmpty()) {
-                event.getChannel().sendMessage("No Lavalink node is available").queue();
-                return;
-            }
-
-            LavalinkNode node = nodeOptional.get();
-
-
-            node.loadItem(identifier)
-                    .retryWhen(Retry.fixedDelay(2, Duration.ofSeconds(3)))
-                    .doOnError(err -> log.error("Error loading {}",err.getMessage()))
-                    .subscribe(
-                    result  -> handleResult(event, link, guildMusicManager, query, result),
-                    error   -> {
-                        log.error("Error loading '{}': {}", query, error.getMessage());
-                        event.getChannel().sendMessage("❌ An error occurred while loading the track.").queue();
-                    }
-
-            );
-        });
-
+        musicManager.connect(channel);
+        return true;
     }
 
 
     private void handleResult(MessageReceivedEvent event, Link link, GuildMusicManager guildMusicManager, String query, LavalinkLoadResult result) {
+
+        long requesterId = event.getAuthor().getIdLong();
 
         switch (result) {
 
@@ -161,7 +136,7 @@ public class PlaySong implements ICommand {
             case SearchResult searchResult -> {
                 List<Track> tracks = searchResult.getTracks();
                 if (tracks.isEmpty()) {
-
+                    noMatches(event, query);
                     return;
                 }
 
@@ -173,75 +148,56 @@ public class PlaySong implements ICommand {
                 List<Track> tracks = playlistLoaded.getTracks();
 
                 if (tracks.isEmpty()) {
-                    event.getChannel().sendMessage("❌ The playlist is empty.").queue();
+                    event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ The playlist is empty.")).queue();
                     return;
                 }
 
-                String playlistName = playlistLoaded.getInfo().getName();
+                tracks.forEach(track -> MusicUtil.setRequester(track, requesterId));
+                musicManager.cancelDisconnect(guildMusicManager.getGuildId());
+
+                String playlistName = MarkdownSanitizer.escape(playlistLoaded.getInfo().getName());
+                long totalLength = tracks.stream().mapToLong(track -> track.getInfo().getLength()).sum();
 
                 link.getPlayer().subscribe(player-> {
 
-                    if (player.getTrack() != null) {
+                    boolean playing = player.getTrack() != null;
 
-                        tracks.forEach(guildMusicManager::enQueue);
-
-                        MessageEmbed embed = new EmbedBuilder()
-                                .setTitle("Added Playlist to Queue")
-                                .addField("Playlist",String.format("[**%s**](%s)",playlistName,query),false)
-                                .addField("Total Tracks",tracks.size()+" songs",false)
-                                .setFooter("Requested by: "+event.getAuthor().getName(),event.getAuthor().getEffectiveAvatarUrl())
-                                .build();
-
-                        event.getChannel().sendMessageEmbeds(embed).queue();
-
+                    if (playing) {
+                        guildMusicManager.enQueueAll(tracks);
                     } else {
-
-                        Track track = tracks.getFirst();
-
-                        tracks.subList(1, tracks.size()).forEach(guildMusicManager::enQueue);
-
-                        MessageEmbed embed = new EmbedBuilder()
-                                .addField("Playlist",String.format("[**%s**](%s)",playlistName,query),false)
-                                .addField("Total Tracks",tracks.size()+" songs",false)
-                                .setFooter("Requested by: "+event.getAuthor().getName(),event.getAuthor().getEffectiveAvatarUrl())
-                                .build();
-
-                        event.getChannel().sendMessageEmbeds(embed).queue();
-
-                        queueOrPlay(event,link,guildMusicManager,track);
-
-
+                        guildMusicManager.enQueueAll(tracks.subList(1, tracks.size()));
+                        musicManager.play(guildMusicManager.getGuildId(), tracks.getFirst());
                     }
 
-                });
+                    MessageEmbed embed = new EmbedBuilder()
+                            .setTitle(playing ? "Added Playlist to Queue" : "Playing Playlist")
+                            .addField("Playlist",String.format("[**%s**](%s)",playlistName,query),false)
+                            .addField("Total Tracks",tracks.size()+" songs",true)
+                            .addField("Total Length",MusicUtil.formatDuration(totalLength),true)
+                            .setThumbnail(tracks.getFirst().getInfo().getArtworkUrl())
+                            .setFooter("Requested by: "+event.getAuthor().getName(),event.getAuthor().getEffectiveAvatarUrl())
+                            .build();
+
+                    event.getChannel().sendMessageEmbeds(embed).queue();
+
+                }, err -> playerError(event, err));
 
 
             }
-            case NoMatches ignored -> {
-                MessageEmbed embed = new EmbedBuilder()
-                        .setColor(0xB22222)
-                        .setDescription("❌ No results found for: **"+query+"**")
-                        .build();
-                event.getChannel().sendMessageEmbeds(embed)
-                    .queue();
-            }
+            case NoMatches ignored -> noMatches(event, query);
 
             case LoadFailed loadFailed -> {
                 String reason = loadFailed.getException().getMessage();
                 log.error("Load failed for '{}': {}", query, reason);
 
-                MessageEmbed embed = new EmbedBuilder()
-                        .setColor(0xB22222)
-                        .setDescription("❌ Failed to load track. **Please try again!!**")
-                        .build();
                 event.getChannel()
-                        .sendMessageEmbeds(embed)
+                        .sendMessageEmbeds(MusicUtil.error("❌ Failed to load track. **Please try again!!**"))
                         .queue();
             }
             default -> {
                 log.warn("Unhandled LavalinkLoadResult type: {}", result.getClass().getSimpleName());
                 event.getChannel()
-                        .sendMessage("❌ Unexpected response from Lavalink.")
+                        .sendMessageEmbeds(MusicUtil.error("❌ Unexpected response from Lavalink."))
                         .queue();
             }
         }
@@ -250,109 +206,50 @@ public class PlaySong implements ICommand {
 
     private void queueOrPlay(MessageReceivedEvent event, Link link, GuildMusicManager guildMusicManager , Track track) {
 
+        MusicUtil.setRequester(track, event.getAuthor().getIdLong());
+        musicManager.cancelDisconnect(guildMusicManager.getGuildId());
+
         link.getPlayer().subscribe(player -> {
 
-            if (player.getTrack() != null) {
-
-
-                guildMusicManager.enQueue(track);
-                String emoji = sourceEmoji(track.getInfo().getSourceName());
-                int color = embedColor(track.getInfo().getSourceName());
-
-                MessageEmbed embed = new EmbedBuilder()
-                        .setTitle(emoji+" Added Track")
-                        .setThumbnail(track.getInfo().getArtworkUrl())
-                        .addField("Song",String.format("[**%s**](%s)",track.getInfo().getTitle(),track.getInfo().getUri()),false)
-                        .addField("Song Length",formatDuration(track.getInfo().getLength()),true)
-                        .addField("Position in Queue",guildMusicManager.getTrackPosition(track)+"",true)
-                        .addBlankField(true)
-                        .setColor(color)
-                        .setFooter("Requested by: "+event.getAuthor().getName(),event.getAuthor().getEffectiveAvatarUrl())
-                        .setDescription("")
-                                .build();
-
-                event.getChannel().sendMessageEmbeds(embed).queue();
-
-            } else {
-
-                player.setTrack(track)
-                        .doOnError(err -> log.error("Error setting a track {}",err.getMessage()))
-                        .subscribe();
-
+            if (player.getTrack() == null) {
+                // The "Now Playing" message is sent by MusicManager when the track starts
+                musicManager.play(guildMusicManager.getGuildId(), track);
+                return;
             }
 
+            int position = guildMusicManager.enQueue(track);
+            TrackInfo info = track.getInfo();
+            String emoji = MusicUtil.sourceEmoji(info.getSourceName());
+            int color = MusicUtil.embedColor(info.getSourceName());
 
-        }, err -> {
-            log.error("Error fetching player: {}",err.getMessage());
-            event.getChannel().sendMessage("Cannot play!").queue();
-        });
+            MessageEmbed embed = new EmbedBuilder()
+                    .setTitle(emoji+" Added Track")
+                    .setThumbnail(info.getArtworkUrl())
+                    .addField("Song",MusicUtil.trackLink(info),false)
+                    .addField("Song Length",MusicUtil.formatDuration(info.getLength()),true)
+                    .addField("Position in Queue",String.valueOf(position),true)
+                    .addBlankField(true)
+                    .setColor(color)
+                    .setFooter("Requested by: "+event.getAuthor().getName(),event.getAuthor().getEffectiveAvatarUrl())
+                    .build();
 
+            event.getChannel().sendMessageEmbeds(embed).queue();
+
+        }, err -> playerError(event, err));
+
+    }
+
+    private void noMatches(MessageReceivedEvent event, String query) {
+        event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ No results found for: **" + MarkdownSanitizer.escape(query) + "**")).queue();
+    }
+
+    private void playerError(MessageReceivedEvent event, Throwable err) {
+        log.error("Error fetching player: {}", err.getMessage());
+        event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ Cannot play right now, please try again!")).queue();
     }
 
     private boolean isUrl(String query) {
         return URL_PATTERN.matcher(query).matches();
     }
-
-
-    private String formatDuration(long ms) {
-        if (ms == 0) return "LIVE";
-        long totalSec = ms / 1000;
-        long hours    = totalSec / 3600;
-        long minutes  = (totalSec % 3600) / 60;
-        long seconds  = totalSec % 60;
-        return hours > 0
-                ? String.format("%d:%02d:%02d", hours, minutes, seconds)
-                : String.format("%d:%02d", minutes, seconds);
-    }
-
-    private String sourceEmoji(String source) {
-
-        switch (source) {
-
-            case "spotify" -> {
-                return "<:Spotify:1487793100314378330>";
-            }
-
-            case "youtube" -> {
-                return "<:Youtubelogo:1487803020707234012>";
-            }
-
-            case "applemusic" -> {
-                return "<:apple_music:1487793599591747654>";
-            }
-
-            case "deezer" -> {
-                return "<:Deezer:1487793743968075836>";
-            }
-        }
-
-        return "null";
-    }
-
-    private int embedColor(String source) {
-        switch (source) {
-
-            case "spotify" -> {
-                return 0x00FF7F;
-            }
-
-            case "youtube" -> {
-                return 0xFF0000;
-            }
-
-            case "applemusic" -> {
-                return 0xDC143C;
-            }
-
-            case "deezer" -> {
-                return 0x8B008B;
-            }
-        }
-
-        return 0x708090;
-    }
-
-
-
 
 }

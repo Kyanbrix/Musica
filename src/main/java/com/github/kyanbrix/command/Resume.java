@@ -1,11 +1,11 @@
 package com.github.kyanbrix.command;
 
+import com.github.kyanbrix.Constant;
+import com.github.kyanbrix.utils.MusicUtil;
 import dev.arbjerg.lavalink.client.LavalinkClient;
 import dev.arbjerg.lavalink.client.Link;
 import net.dv8tion.jda.api.EmbedBuilder;
-import net.dv8tion.jda.api.entities.Guild;
 import net.dv8tion.jda.api.entities.GuildVoiceState;
-import net.dv8tion.jda.api.entities.MessageEmbed;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,33 +20,17 @@ public class Resume implements ICommand {
     }
 
     @Override
-    public void execute(MessageReceivedEvent event) {
+    public void execute(MessageReceivedEvent event, String args) {
 
-        Guild guild = event.getGuild();
+        // The bot's own member is always cached, no need to fetch it
+        GuildVoiceState voiceState = event.getGuild().getSelfMember().getVoiceState();
 
-        guild.retrieveMemberById(event.getJDA().getSelfUser().getIdLong()).queue(member -> {
+        if (voiceState != null && voiceState.isGuildMuted()) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("It appears I am muted! You need to unmute me first.")).queue();
+            return;
+        }
 
-            GuildVoiceState voiceState = member.getVoiceState();
-
-            if (voiceState != null) {
-
-                if (member.getVoiceState().isGuildMuted()) {
-                    MessageEmbed embed = new EmbedBuilder()
-                            .setDescription("It appears I am muted! You need to unmute me first.")
-                            .setColor(0xB22222)
-                            .build();
-
-                    event.getChannel().sendMessageEmbeds(embed).queue();
-
-                }else {
-
-                    if (assertMemberInVoice(event)) handleResume(event);
-
-                }
-
-            }
-
-        });
+        if (assertMemberInVoice(event)) handleResume(event);
 
     }
 
@@ -57,39 +41,46 @@ public class Resume implements ICommand {
 
     @Override
     public String[] aliases() {
-        return new String[]{"rs"};
+        return new String[]{"rs", "unpause"};
+    }
+
+    @Override
+    public String description() {
+        return "Resumes the paused song";
     }
 
     private void handleResume(MessageReceivedEvent event) {
 
-        long guildId = event.getGuild().getIdLong();
-        Link link = client.getOrCreateLink(guildId);
+        Link link = client.getLinkIfCached(event.getGuild().getIdLong());
+
+        if (link == null) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ Nothing is currently playing")).queue();
+            return;
+        }
 
         link.getPlayer().subscribe(player -> {
 
             EmbedBuilder eb = new EmbedBuilder();
             if (player.getTrack() == null) {
-                eb.setDescription("❌ Nothing is currently playing");
-                event.getChannel().sendMessageEmbeds(eb.build()).queue();
+                event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ Nothing is currently playing")).queue();
 
                 return;
             }
             if (!player.getPaused()) {
-                eb.setDescription("▶️ Already playing. Use `?pause` to pause the song.");
+                eb.setDescription(String.format("▶️ Already playing. Use `%spause` to pause the song.", Constant.PREFIX));
                 event.getChannel().sendMessageEmbeds(eb.build()).queue();
                 return;
             }
 
             player.setPaused(false)
-                    .doOnError(err -> log.error("Error resuming player: {}", err.getMessage()))
-                    .subscribe();
+                    .subscribe(p -> { }, err -> log.error("Error resuming player: {}", err.getMessage()));
 
-            eb.setDescription(String.format("▶️ Resumed: [**%s**](%s)",player.getTrack().getInfo().getTitle(),player.getTrack().getInfo().getUri()));
+            eb.setDescription("▶️ Resumed: " + MusicUtil.trackLink(player.getTrack().getInfo()));
             eb.setColor(0xFFA500);
             event.getChannel().sendMessageEmbeds(eb.build()).queue();
         }, err -> {
             log.error("Error fetching player for resume: {}", err.getMessage());
-            event.getChannel().sendMessage("Could not access the player").queue();
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("Could not access the player")).queue();
         });
     }
 }

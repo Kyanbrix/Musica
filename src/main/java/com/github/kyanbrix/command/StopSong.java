@@ -1,29 +1,26 @@
 package com.github.kyanbrix.command;
 
-import com.github.kyanbrix.GuildMusicManager;
+import com.github.kyanbrix.Constant;
 import com.github.kyanbrix.MusicManager;
-import dev.arbjerg.lavalink.client.LavalinkClient;
-import dev.arbjerg.lavalink.client.Link;
+import com.github.kyanbrix.utils.MusicUtil;
 import net.dv8tion.jda.api.EmbedBuilder;
+import net.dv8tion.jda.api.entities.GuildVoiceState;
 import net.dv8tion.jda.api.entities.MessageEmbed;
-import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class StopSong implements ICommand {
-    private final LavalinkClient client;
     private static final Logger log = LoggerFactory.getLogger(StopSong.class);
     private final MusicManager musicManager;
 
-    public StopSong(LavalinkClient client, MusicManager musicManager) {
+    public StopSong(MusicManager musicManager) {
 
-        this.client = client;
         this.musicManager = musicManager;
     }
 
     @Override
-    public void execute(MessageReceivedEvent event) {
+    public void execute(MessageReceivedEvent event, String args) {
 
         if (assertMemberInVoice(event)) handleStop(event);
 
@@ -37,33 +34,32 @@ public class StopSong implements ICommand {
     @Override
     public String[] aliases() {
 
-        return new String[]{"stop"};
+        return new String[]{"dc","disconnect","dis","discon","disconn","leave"};
+    }
+
+    @Override
+    public String description() {
+        return "Stops the music, clears the queue and leaves the voice channel";
     }
 
     private void handleStop(MessageReceivedEvent event) {
 
         long guildId = event.getGuild().getIdLong();
-        GuildMusicManager guildManager = musicManager.getOrCreate(guildId);
-        Link link = client.getOrCreateLink(guildId);
 
-        // 1. Clear the queue immediately
-        guildManager.clearQueue();
+        GuildVoiceState selfVoiceState = event.getGuild().getSelfMember().getVoiceState();
+        if (selfVoiceState == null || !selfVoiceState.inAudioChannel()) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ I'm not in a voice channel.")).queue();
+            return;
+        }
 
-        // 2. Stop player, destroy link, close voice connection
-        link.getPlayer()
-                .flatMap(player -> player.setTrack(null))   // null track = stop playback
-                .doOnSuccess(v -> {
-                    musicManager.disconnectAndClean(guildId);
-                    musicManager.remove(guildId);
-                    log.info("[Guild {}] Stopped and cleaned up.", guildId);
-                })
-                .doOnError(err -> log.error("Error during stop: {}", err.getMessage()))
-                .subscribe();
+        // Clears the queue, destroys the player and leaves the voice channel
+        musicManager.disconnectAndClean(guildId);
+        log.info("[Guild {}] Stopped and cleaned up.", guildId);
 
-        // Reply immediately (the cleanup above is async but fast)
         MessageEmbed embed = new EmbedBuilder()
-                .setColor(0xB22222)
-                .setDescription("⏹️ Stopped the music, cleared the queue, and disconnected.")
+                .setColor(Constant.ERROR_COLOR)
+                .setAuthor("Nabunturan",null,event.getJDA().getSelfUser().getEffectiveAvatarUrl())
+                .setDescription("⏹️ Thank you for using jockie nabunturan as your musician!")
                 .build();
 
         event.getChannel().sendMessageEmbeds(embed).queue();

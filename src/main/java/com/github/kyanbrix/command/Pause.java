@@ -1,9 +1,10 @@
 package com.github.kyanbrix.command;
 
+import com.github.kyanbrix.Constant;
+import com.github.kyanbrix.utils.MusicUtil;
 import dev.arbjerg.lavalink.client.LavalinkClient;
 import dev.arbjerg.lavalink.client.Link;
 import net.dv8tion.jda.api.EmbedBuilder;
-import net.dv8tion.jda.api.entities.Guild;
 import net.dv8tion.jda.api.entities.GuildVoiceState;
 import net.dv8tion.jda.api.entities.MessageEmbed;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
@@ -20,33 +21,17 @@ public class Pause implements ICommand {
     }
 
     @Override
-    public void execute(MessageReceivedEvent event) {
+    public void execute(MessageReceivedEvent event, String args) {
 
-        Guild guild = event.getGuild();
+        // The bot's own member is always cached, no need to fetch it
+        GuildVoiceState voiceState = event.getGuild().getSelfMember().getVoiceState();
 
-        guild.retrieveMemberById(event.getJDA().getSelfUser().getIdLong()).queue(member -> {
+        if (voiceState != null && voiceState.isGuildMuted()) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("It appears I am muted! You need to unmute me first.")).queue();
+            return;
+        }
 
-            GuildVoiceState voiceState = member.getVoiceState();
-
-            if (voiceState != null) {
-
-                if (member.getVoiceState().isGuildMuted()) {
-                    MessageEmbed embed = new EmbedBuilder()
-                            .setDescription("It appears I am muted! You need to unmute me first.")
-                            .setColor(0xB22222)
-                            .build();
-
-                    event.getChannel().sendMessageEmbeds(embed).queue();
-
-                }else {
-
-                    if (assertMemberInVoice(event)) handlePause(event);
-
-                }
-
-            }
-
-        });
+        if (assertMemberInVoice(event)) handlePause(event);
 
     }
 
@@ -60,46 +45,49 @@ public class Pause implements ICommand {
         return new String[]{"freeze","paws"};
     }
 
+    @Override
+    public String description() {
+        return "Pauses the current song";
+    }
+
     private void handlePause(MessageReceivedEvent event) {
 
-        assertMemberInVoice(event);
+        Link link = client.getLinkIfCached(event.getGuild().getIdLong());
 
-        long guildId = event.getGuild().getIdLong();
-        Link link = client.getOrCreateLink(guildId);
+        if (link == null) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ Nothing is currently playing.")).queue();
+            return;
+        }
 
         link.getPlayer().subscribe(player -> {
 
             if (player.getTrack() == null) {
-                MessageEmbed embed = new EmbedBuilder()
-                        .setColor(0xB22222)
-                        .setDescription("❌ Nothing is currently playing.")
-                        .build();
-                event.getChannel().sendMessageEmbeds(embed).queue();
+                event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ Nothing is currently playing.")).queue();
                 return;
             }
 
             if (player.getPaused()) {
                 MessageEmbed embed = new EmbedBuilder()
-                        .setDescription("⏸️ Song is already paused. `!resume / !rs` to continue.")
+                        .setDescription(String.format("⏸️ Song is already paused. `%sresume / %srs` to continue.", Constant.PREFIX, Constant.PREFIX))
                         .build();
                 event.getChannel().sendMessageEmbeds(embed).queue();
                 return;
             }
 
             player.setPaused(true)
-                    .doOnError(err-> log.error("Error pausing a track"))
-                    .subscribe();
+                    .subscribe(p -> { }, err -> log.error("Error pausing a track: {}", err.getMessage()));
 
             MessageEmbed embed = new EmbedBuilder()
                     .setAuthor(event.getAuthor().getName()+" paused the song",null,event.getAuthor().getEffectiveAvatarUrl())
-                    .setDescription("⏸️ Paused: [**"+player.getTrack().getInfo().getTitle()+"**]("+player.getTrack().getInfo().getUri()+")")
+                    .setDescription("⏸️ Paused: " + MusicUtil.trackLink(player.getTrack().getInfo()))
                             .build();
 
             event.getChannel().sendMessageEmbeds(embed).queue();
 
+        }, err -> {
+            log.error("Error fetching player for pause: {}", err.getMessage());
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("Could not access the player")).queue();
         });
-
-
 
     }
 

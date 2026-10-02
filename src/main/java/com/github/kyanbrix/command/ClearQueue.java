@@ -16,7 +16,7 @@ public class ClearQueue implements ICommand {
     }
 
     @Override
-    public void execute(MessageReceivedEvent event) {
+    public void execute(MessageReceivedEvent event, String args) {
 
         if (assertMemberInVoice(event)) handleClear(event);
 
@@ -32,17 +32,23 @@ public class ClearQueue implements ICommand {
         return new String[]{"clr"};
     }
 
+    @Override
+    public String description() {
+        return "Removes every song from the queue (keeps the current one playing)";
+    }
+
     private void handleClear(MessageReceivedEvent event) {
 
         long guildId = event.getGuild().getIdLong();
 
-        GuildMusicManager guildMusicManager = musicManager.getOrCreate(guildId);
+        GuildMusicManager guildMusicManager = musicManager.get(guildId);
+        int cleared = guildMusicManager == null ? 0 : guildMusicManager.queueSize();
 
-        guildMusicManager.clearQueue();
+        if (guildMusicManager != null) guildMusicManager.clearQueue();
 
         MessageEmbed embed = new EmbedBuilder()
                 .setColor(0xFFFF00)
-                .setDescription("Tracks has been cleared")
+                .setDescription("🗑️ Cleared **" + cleared + "** track(s) from the queue")
                 .build();
 
         event.getChannel().sendMessageEmbeds(embed).queue();

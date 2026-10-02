@@ -1,12 +1,13 @@
 package com.github.kyanbrix;
 
+import com.github.kyanbrix.utils.MusicUtil;
 import dev.arbjerg.lavalink.client.LavalinkClient;
 import dev.arbjerg.lavalink.client.Link;
+import dev.arbjerg.lavalink.client.player.LavalinkPlayer;
 import net.dv8tion.jda.api.EmbedBuilder;
 import net.dv8tion.jda.api.entities.Guild;
-import net.dv8tion.jda.api.entities.MessageEmbed;
-import net.dv8tion.jda.api.entities.channel.concrete.TextChannel;
-import net.dv8tion.jda.api.entities.channel.concrete.VoiceChannel;
+import net.dv8tion.jda.api.entities.GuildVoiceState;
+import net.dv8tion.jda.api.entities.channel.middleman.AudioChannel;
 import net.dv8tion.jda.api.entities.channel.unions.AudioChannelUnion;
 import net.dv8tion.jda.api.events.guild.voice.GuildVoiceGuildMuteEvent;
 import net.dv8tion.jda.api.events.guild.voice.GuildVoiceUpdateEvent;
@@ -28,185 +29,105 @@ public class VoiceChannelListener extends ListenerAdapter {
 
     @Override
     public void onGuildVoiceGuildMute(@NonNull GuildVoiceGuildMuteEvent event) {
-        if (!event.getMember().getUser().isBot()) return;
-        if (!event.getMember().getId().equals(event.getJDA().getSelfUser().getId())) return;
+        if (event.getMember().getIdLong() != event.getJDA().getSelfUser().getIdLong()) return;
 
         Guild guild = event.getGuild();
+        long guildId = guild.getIdLong();
+        boolean muted = event.isGuildMuted();
 
-        Link link = client.getOrCreateLink(guild.getIdLong());
+        Link link = client.getLinkIfCached(guildId);
+        if (link == null) return;
 
-        if (event.isGuildMuted()) {
+        link.getPlayer().subscribe(player -> {
 
-            link.getPlayer().subscribe(player -> {
+            if (player.getTrack() == null || player.getPaused() == muted) return;
 
-                if (player.getTrack() == null) {
-                    return;
-                }
+            player.setPaused(muted)
+                    .subscribe(p -> { }, throwable -> log.error("Error (un)pausing player after mute change", throwable));
 
-                if (player.getPaused()) {
-                    return;
-                }
-
-                player.setPaused(true).doOnError(throwable -> log.error("Error on pausing player",throwable)).subscribe();
-
-                MessageEmbed embed = new EmbedBuilder()
-                        .setDescription("I have been muted, I will pause the track until I have been unmuted from the admins!")
-                        .setColor(0xB22222)
-                        .build();
-
-                long channelId = musicManager.getOrCreate(guild.getIdLong()).getTextChannelId();
-
-                if (channelId != 0L) {
-
-                    TextChannel channel = guild.getTextChannelById(channelId);
-
-                    if (channel != null) {
-
-                        channel.sendMessageEmbeds(embed).queue();
-
-                    }else {
-
-                        VoiceChannel voiceChannel = guild.getVoiceChannelById(channelId);
-
-                        if (voiceChannel == null) return;
-
-                        voiceChannel.sendMessageEmbeds(embed).queue();
-
-                    }
-
-
-                }
-
-            });
-
-
-
-        }else {
-
-            link.getPlayer().subscribe(player -> {
-
-                if (player.getTrack() == null) {
-                    return;
-                }
-
-                if (!player.getPaused()) {
-                    return;
-                }
-
-                player.setPaused(false)
-                        .doOnError(throwable -> log.error(throwable.getMessage()))
-                        .subscribe();
-
-                long channelId = musicManager.getOrCreate(guild.getIdLong()).getTextChannelId();
-
-                MessageEmbed embed = new EmbedBuilder()
+            musicManager.announce(guildId, muted
+                    ? MusicUtil.error("I have been muted, I will pause the track until I have been unmuted by the admins!")
+                    : new EmbedBuilder()
                         .setDescription("I have been unmuted, I will resume playing!")
                         .setColor(0xFFD700)
-                        .build();
-
-                if (channelId != 0L) {
-
-                    TextChannel channel = guild.getTextChannelById(channelId);
-
-                    if (channel != null) {
-
-                        channel.sendMessageEmbeds(embed).queue();
-
-                    }else {
-
-                        VoiceChannel voiceChannel = guild.getVoiceChannelById(channelId);
-
-                        if (voiceChannel == null) return;
-
-                        voiceChannel.sendMessageEmbeds(embed).queue();
-
-                    }
-
-
-                }
-
-
-
-            });
-
-
-        }
+                        .build());
+        }, err -> log.error("Error fetching player after mute change", err));
 
     }
 
     @Override
     public void onGuildVoiceUpdate(@NonNull GuildVoiceUpdateEvent event) {
 
-        if (!event.getMember().getUser().isBot()) return;
+        Guild guild = event.getGuild();
 
-        //Check if a user is a bot itself
-        if (event.getMember().getIdLong() != event.getJDA().getSelfUser().getIdLong()) return;
+        if (event.getMember().getIdLong() == event.getJDA().getSelfUser().getIdLong()) {
+            handleSelfUpdate(event, guild);
+        } else {
+            handleListenerChange(guild);
+        }
+    }
+
+    private void handleSelfUpdate(GuildVoiceUpdateEvent event, Guild guild) {
 
         AudioChannelUnion joined = event.getChannelJoined();
         AudioChannelUnion left = event.getChannelLeft();
+        long guildId = guild.getIdLong();
 
-        Guild guild = event.getGuild();
+        if (joined != null && left == null) {
 
-        if (joined == null && left != null) {
+            client.getOrCreateLink(guildId).getPlayer().subscribe(lavalinkPlayer -> {
 
-            GuildMusicManager manager = musicManager.getOrCreate(event.getGuild().getIdLong());
+                lavalinkPlayer.setVolume(100)
+                        .subscribe(p -> { }, err -> log.error("Could not set volume", err));
 
-            manager.clearQueue();
-            musicManager.disconnectAndClean(event.getGuild().getIdLong());
-            musicManager.remove(event.getGuild().getIdLong());
-
-            TextChannel channel = guild.getTextChannelById(manager.getTextChannelId());
-
-            EmbedBuilder eb = new EmbedBuilder();
-            eb.setDescription("⚠️ I was disconnected from the voice channel.");
-            eb.setColor(0xB22222);
-            if (channel != null) {
-
-                channel.sendMessageEmbeds(eb.build()).queue();
-
-            }else {
-
-                VoiceChannel voiceChannel = guild.getVoiceChannelById(manager.getTextChannelId());
-
-                if (voiceChannel == null) return;
-
-                voiceChannel.sendMessageEmbeds(eb.build()).queue();
-
-            }
-
+            }, err -> log.error("Could not fetch player on join", err));
             return;
         }
 
-        //Bot is moved
-        if (joined != null && left != null) {
 
-            long textChannelId = musicManager.getOrCreate(guild.getIdLong()).getTextChannelId();
+        if (joined == null && left != null) {
 
-            if (textChannelId != 0L) {
-                TextChannel channel = guild.getTextChannelById(textChannelId);
-
-                EmbedBuilder eb = new EmbedBuilder();
-                eb.setDescription("⚠️ I was moved to "+joined.getAsMention());
-                eb.setColor(0xB22222);
-                if (channel != null) {
-
-                    channel.sendMessageEmbeds(eb.build()).queue();
-
-                }else {
-
-                    VoiceChannel voiceChannel = guild.getVoiceChannelById(textChannelId);
-
-                    if (voiceChannel == null) return;
-
-                    voiceChannel.sendMessageEmbeds(eb.build()).queue();
-
-                }
-
+            if (musicManager.get(guildId) != null) {
+                musicManager.announce(guildId, MusicUtil.error("⚠️ I was disconnected from the voice channel."));
             }
 
+            musicManager.disconnectAndClean(guildId);
+            return;
+        }
+        if (joined != null) {
 
+            musicManager.announce(guildId, new EmbedBuilder()
+                    .setDescription("⚠️ I was moved to " + joined.getAsMention())
+                    .setColor(Constant.ERROR_COLOR)
+                    .build());
+
+            handleListenerChange(guild);
         }
 
+    }
 
+    private void handleListenerChange(Guild guild) {
+
+        GuildVoiceState selfState = guild.getSelfMember().getVoiceState();
+        if (selfState == null || !selfState.inAudioChannel()) return;
+
+        long guildId = guild.getIdLong();
+        GuildMusicManager manager = musicManager.get(guildId);
+        if (manager == null) return;
+
+        AudioChannel channel = selfState.getChannel();
+        boolean alone = channel.getMembers().stream().allMatch(member -> member.getUser().isBot());
+
+        if (alone) {
+            // Don't restart a running timer on every unrelated voice update
+            if (!manager.hasDisconnectTask()) musicManager.scheduleDisconnect(guildId);
+            return;
+        }
+
+        Link link = client.getLinkIfCached(guildId);
+        LavalinkPlayer player = link == null ? null : link.getCachedPlayer();
+        if (player != null && player.getTrack() != null) {
+            musicManager.cancelDisconnect(guildId);
+        }
     }
 }

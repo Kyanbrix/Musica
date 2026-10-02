@@ -13,7 +13,7 @@ public class ShuffleQueue implements ICommand {
     }
 
     @Override
-    public void execute(MessageReceivedEvent event) {
+    public void execute(MessageReceivedEvent event, String args) {
 
         if (assertMemberInVoice(event)) handleShuffle(event);
 
@@ -26,11 +26,11 @@ public class ShuffleQueue implements ICommand {
 
     private void handleShuffle(MessageReceivedEvent event) {
 
-        GuildMusicManager manager = musicManager.getOrCreate(event.getGuild().getIdLong());
+        GuildMusicManager manager = musicManager.get(event.getGuild().getIdLong());
 
         EmbedBuilder eb = new EmbedBuilder();
 
-        if (manager.getTrackQueue().isEmpty()) {
+        if (manager == null || manager.isQueueEmpty()) {
 
             eb.setDescription("The queue is empty!");
             eb.setColor(0x8B0000);
@@ -40,7 +40,7 @@ public class ShuffleQueue implements ICommand {
 
         manager.shuffleQueue();
 
-        eb.setDescription("Queue has been shuffled");
+        eb.setDescription("🔀 Shuffled **" + manager.queueSize() + "** tracks in the queue");
         eb.setColor(0xFF8C00);
         event.getChannel().sendMessageEmbeds(eb.build()).queue();
 
@@ -50,5 +50,10 @@ public class ShuffleQueue implements ICommand {
     @Override
     public String[] aliases() {
         return new String[]{"sh","shuf","shuff"};
+    }
+
+    @Override
+    public String description() {
+        return "Shuffles the queue";
     }
 }

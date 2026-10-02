@@ -1,16 +1,21 @@
 package com.github.kyanbrix.command;
 
 import com.github.kyanbrix.LyricsClient;
+import com.github.kyanbrix.utils.MusicUtil;
 import dev.arbjerg.lavalink.client.LavalinkClient;
-import dev.arbjerg.lavalink.client.LavalinkNode;
+import dev.arbjerg.lavalink.client.Link;
+import dev.arbjerg.lavalink.client.player.LavalinkPlayer;
 import dev.arbjerg.lavalink.protocol.v4.TrackInfo;
 import net.dv8tion.jda.api.EmbedBuilder;
 import net.dv8tion.jda.api.entities.MessageEmbed;
 import net.dv8tion.jda.api.events.message.MessageReceivedEvent;
-
-import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class GetLyrics implements ICommand {
+
+    private static final Logger log = LoggerFactory.getLogger(GetLyrics.class);
+    private static final int MAX_LENGTH = 4000; // embed description limit is 4096
 
     private final LavalinkClient client;
 
@@ -22,9 +27,9 @@ public class GetLyrics implements ICommand {
     }
 
     @Override
-    public void execute(MessageReceivedEvent event) {
+    public void execute(MessageReceivedEvent event, String args) {
 
-        if (assertMemberInVoice(event)) handleLyrics(event);
+        handleLyrics(event);
 
     }
 
@@ -33,61 +38,54 @@ public class GetLyrics implements ICommand {
         return "lyrics";
     }
 
+    @Override
+    public String[] aliases() {
+        return new String[]{"ly"};
+    }
+
+    @Override
+    public String description() {
+        return "Shows the lyrics of the current song";
+    }
 
     private void handleLyrics(MessageReceivedEvent event) {
 
         long guildId = event.getGuild().getIdLong();
+        Link link = client.getLinkIfCached(guildId);
+        LavalinkPlayer player = link == null ? null : link.getCachedPlayer();
 
-        Optional<LavalinkNode> node = client.getNodes()
-                .stream()
-                .filter(LavalinkNode::getAvailable)
-                .findFirst();
+        if (player == null || player.getTrack() == null) {
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("Nothing is currently playing.")).queue();
+            return;
+        }
 
-        node.ifPresent(lavalinkNode -> {
+        TrackInfo trackInfo = player.getTrack().getInfo();
+        event.getChannel().sendTyping().queue();
 
-            client.getOrCreateLink(guildId).getPlayer().subscribe(player -> {
-                EmbedBuilder builder = new EmbedBuilder();
-                if (player.getTrack() == null) {
-                    builder.setDescription("Nothing is currently playing.");
-                    event.getChannel().sendMessageEmbeds(builder.build()).queue();
-                    return;
-                }
+        // The lyrics endpoint is per player, so ask the node the player lives on
+        lyricsClient.fetchLyrics(link.getNode(), guildId).subscribe(lyricsOptional -> {
 
-                TrackInfo trackInfo = player.getTrack().getInfo();
+            if (lyricsOptional.isEmpty()) {
+                event.getChannel().sendMessageEmbeds(MusicUtil.error(String.format("No Lyrics found for **%s**.", trackInfo.getTitle()))).queue();
+                return;
+            }
 
-                Optional<LyricsClient.Lyrics> lyricsOptional = lyricsClient.fetchLyrics(lavalinkNode.getSessionId(),guildId);
+            LyricsClient.Lyrics lyrics = lyricsOptional.get();
 
-                if (lyricsOptional.isEmpty()) {
+            MessageEmbed embed = new EmbedBuilder()
+                    .setTitle("🎵 " + MusicUtil.truncate(trackInfo.getTitle(), 250), trackInfo.getUri())
+                    .setColor(0xF0E68C)
+                    .setThumbnail(trackInfo.getArtworkUrl())
+                    .setDescription(MusicUtil.truncate(lyrics.text(), MAX_LENGTH))
+                    .setFooter("Lyrics provided by " + lyrics.source())
+                    .build();
 
-                    builder.setDescription(String.format("No Lyrics found for **%s**.",trackInfo.getTitle()));
-                    event.getChannel().sendMessageEmbeds(builder.build()).queue();
-                    return;
-                }
+            event.getChannel().sendMessageEmbeds(embed).queue();
 
-                LyricsClient.Lyrics lyrics = lyricsOptional.get();
-
-                String fullLyrics = lyrics.text();
-
-                String displayLyrics = fullLyrics.length() > 3900 ? fullLyrics.substring(0,3900) : fullLyrics;
-
-                MessageEmbed embed = new EmbedBuilder()
-                        .setTitle("\uD83C\uDFB5" + trackInfo.getTitle())
-                        .setColor(0xF0E68C)
-                        .setDescription(displayLyrics)
-                        .build();
-
-                event.getChannel().sendMessageEmbeds(embed).queue();
-
-
-            });
-
+        }, err -> {
+            log.error("Error fetching lyrics: {}", err.getMessage());
+            event.getChannel().sendMessageEmbeds(MusicUtil.error("❌ Could not fetch the lyrics right now.")).queue();
         });
-
-
-
-
-
-
 
     }
 }
